@@ -196,8 +196,9 @@ unsafe fn read_image(file_path: &str) -> Result<()> {
     };
     WIDTH = img.width() as i32;
     HEIGHT = img.height() as i32;
-    dbg!(WIDTH);
-    dbg!(HEIGHT);
+
+    let bgr = img.into_bgr();
+    ensure!(bgr.len() <= 640 * 480 * 3, "Invalid data length.");
 
     let remain = (3 * WIDTH as usize) % 4;
     if remain > 0 {
@@ -205,17 +206,15 @@ unsafe fn read_image(file_path: &str) -> Result<()> {
         let line_bytes_len = chunk_size + 4 - remain;
         BUF_LEN = line_bytes_len * HEIGHT as usize;
         let mut p = BUF.as_mut_ptr();
-        img.into_bgr().chunks(chunk_size).for_each(|c| {
+        bgr.chunks(chunk_size).for_each(|c| {
             ptr::copy_nonoverlapping(c.as_ptr(), p, chunk_size);
             p = p.add(line_bytes_len);
         });
     } else {
-        // let buf = img.into_bgr().to_vec();
-        // dbg!(buf.len());
         BUF_LEN = (WIDTH * HEIGHT * 3) as usize;
-        ptr::copy_nonoverlapping(img.into_bgr().as_ptr(), BUF.as_mut_ptr(), BUF_LEN);
+        ptr::copy_nonoverlapping(bgr.as_ptr(), BUF.as_mut_ptr(), BUF_LEN);
     };
-    dbg!(BUF_LEN);
+
     let rc = RECT {
         top: 32,
         left: 0,
@@ -230,11 +229,12 @@ unsafe fn open_dialog(h_wnd: HWND) -> Result<String> {
     const MAX_PATH: u32 = 260;
     let mut buf = [0u16; MAX_PATH as usize];
 
+    let filter = l("Image file\0*.jpg;*.png;*.gif;*.bmp\0");
+    let title = l("Choose a image file");
+
     let mut ofn = zeroed::<OPENFILENAMEW>();
     ofn.lStructSize = mem::size_of::<OPENFILENAMEW>() as u32;
-    let filter = l("Image file\0*.jpg;*.png;*.gif;*.bmp\0");
     ofn.lpstrFilter = filter.as_ptr();
-    let title = l("Choose a image file");
     ofn.lpstrTitle = title.as_ptr();
     ofn.lpstrFile = buf.as_mut_ptr();
     ofn.nMaxFile = MAX_PATH;
