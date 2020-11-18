@@ -1,0 +1,23 @@
+[package]
+name = "pinion"
+version = "0.1.0"
+authors = ["benki"]
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0"
+image = "0.23"
+
+[dependencies.winapi]
+version = "0.3"
+features = [
+    "commdlg",
+    "minwindef",
+    "windef",
+    "wingdi",
+    "winuser",
+]
+
+[profile.release]
+codegen-units = 1
+lto = true
