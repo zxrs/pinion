@@ -24,10 +24,10 @@ use winapi::{
         winuser::{
             BeginPaint, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndPaint, GetMessageW,
             GetSysColorBrush, InvalidateRect, LoadCursorW, LoadIconW, MessageBoxW, PostQuitMessage,
-            RegisterClassW, SendMessageW, ShowWindow, TranslateMessage, UpdateWindow, BN_CLICKED,
-            BS_PUSHBUTTON, COLOR_MENUBAR, CW_USEDEFAULT, IDI_APPLICATION, MB_OK, MSG, PAINTSTRUCT,
-            SW_SHOW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_PAINT, WM_SETFONT, WNDCLASSW,
-            WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE,
+            RegisterClassW, SendMessageW, SetWindowTextW, ShowWindow, TranslateMessage,
+            UpdateWindow, BN_CLICKED, BS_PUSHBUTTON, COLOR_MENUBAR, CW_USEDEFAULT, IDI_APPLICATION,
+            MB_OK, MSG, PAINTSTRUCT, SW_SHOW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_PAINT,
+            WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE,
         },
     },
 };
@@ -222,6 +222,8 @@ unsafe fn read_image(file_path: &str) -> Result<()> {
         bottom: 512,
     };
     InvalidateRect(H_WINDOW, &rc, TRUE);
+
+    SetWindowTextW(H_WINDOW, l(file_path).as_ptr());
     Ok(())
 }
 
