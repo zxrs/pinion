@@ -35,7 +35,7 @@ use winapi::{
 static mut H_WINDOW: HWND = ptr::null_mut();
 static mut H_FONT: HFONT = ptr::null_mut();
 static mut BUF: Vec<u8> = Vec::new();
-static mut BUF_LEN: usize = 0;
+static mut DATA_LEN: usize = 0;
 static mut WIDTH: i32 = 0;
 static mut HEIGHT: i32 = 0;
 
@@ -101,7 +101,7 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => create(h_wnd),
         WM_COMMAND => command(h_wnd, w_param),
         WM_PAINT => {
-            if BUF_LEN > 0 {
+            if DATA_LEN > 0 {
                 paint(h_wnd)
             } else {
                 return DefWindowProcW(h_wnd, msg, w_param, l_param);
@@ -204,15 +204,15 @@ unsafe fn read_image(file_path: &str) -> Result<()> {
     if remain > 0 {
         let chunk_size = 3 * WIDTH as usize;
         let line_bytes_len = chunk_size + 4 - remain;
-        BUF_LEN = line_bytes_len * HEIGHT as usize;
+        DATA_LEN = line_bytes_len * HEIGHT as usize;
         let mut p = BUF.as_mut_ptr();
         bgr.chunks(chunk_size).for_each(|c| {
             ptr::copy_nonoverlapping(c.as_ptr(), p, chunk_size);
             p = p.add(line_bytes_len);
         });
     } else {
-        BUF_LEN = (WIDTH * HEIGHT * 3) as usize;
-        ptr::copy_nonoverlapping(bgr.as_ptr(), BUF.as_mut_ptr(), BUF_LEN);
+        DATA_LEN = (WIDTH * HEIGHT * 3) as usize;
+        ptr::copy_nonoverlapping(bgr.as_ptr(), BUF.as_mut_ptr(), DATA_LEN);
     };
 
     let rc = RECT {
@@ -260,7 +260,7 @@ unsafe fn paint(h_wnd: HWND) -> Result<()> {
     bi.bmiHeader.biHeight = -HEIGHT;
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 24;
-    bi.bmiHeader.biSizeImage = BUF_LEN as u32;
+    bi.bmiHeader.biSizeImage = DATA_LEN as u32;
     bi.bmiHeader.biCompression = BI_RGB;
 
     let h_bmp = CreateCompatibleBitmap(hdc, WIDTH, HEIGHT);
