@@ -288,7 +288,7 @@ fn paint(h_wnd: HWND) -> Result<()> {
         bmiHeader: BITMAPINFOHEADER {
             biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width,
-            biHeight: height,
+            biHeight: -height,
             biPlanes: 1,
             biBitCount: 24,
             biCompression: BI_RGB,
