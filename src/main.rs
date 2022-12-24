@@ -1,40 +1,42 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
-use anyhow::{ensure, Error, Result};
-use image::{self, imageops, GenericImageView};
-use std::char::{decode_utf16, REPLACEMENT_CHARACTER};
+use anyhow::{ensure, Context, Error, Result};
+use image::{self, imageops};
 use std::env;
+use std::ffi::c_void;
 use std::mem;
 use std::ptr;
-use std::slice;
-use winapi::{
-    ctypes::c_void,
-    shared::{
-        minwindef::{HIWORD, LOWORD, LPARAM, LRESULT, TRUE, UINT, WPARAM},
-        windef::{HFONT, HMENU, HWND, RECT},
-    },
-    um::{
-        commdlg::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OPENFILENAMEW},
-        wingdi::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DeleteDC,
-            DeleteObject, SelectObject, SetDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-            CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DIB_RGB_COLORS,
-            FF_DONTCARE, OUT_DEFAULT_PRECIS, SRCCOPY,
+use windows::{
+    core::{PCWSTR, PWSTR},
+    w,
+    Win32::{
+        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Graphics::Gdi::{
+            BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, DeleteDC,
+            DeleteObject, EndPaint, GetSysColorBrush, InvalidateRect, SelectObject, SetDIBits,
+            UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS, COLOR_MENUBAR,
+            DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DIB_RGB_COLORS, FF_DONTCARE, HFONT,
+            OUT_DEFAULT_PRECIS, PAINTSTRUCT, SRCCOPY,
         },
-        winuser::{
-            BeginPaint, CreateWindowExW, DefWindowProcW, DispatchMessageW, EndPaint, GetMessageW,
-            GetSysColorBrush, InvalidateRect, LoadCursorW, LoadIconW, MessageBoxW, PostQuitMessage,
-            RegisterClassW, SendMessageW, SetWindowTextW, ShowWindow, TranslateMessage,
-            UpdateWindow, BN_CLICKED, BS_PUSHBUTTON, COLOR_MENUBAR, CW_USEDEFAULT, IDI_APPLICATION,
-            MB_OK, MSG, PAINTSTRUCT, SW_SHOW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_PAINT,
-            WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE,
+        UI::{
+            Controls::Dialogs::{GetOpenFileNameW, OFN_FILEMUSTEXIST, OPENFILENAMEW},
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, LoadCursorW,
+                MessageBoxW, PostQuitMessage, RegisterClassW, SendMessageW, SetWindowTextW,
+                ShowWindow, TranslateMessage, BN_CLICKED, BS_PUSHBUTTON, CW_USEDEFAULT, HMENU,
+                IDI_APPLICATION, MB_OK, MSG, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_COMMAND,
+                WM_CREATE, WM_DESTROY, WM_PAINT, WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD,
+                WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE,
+            },
         },
     },
 };
 
-static mut H_WINDOW: HWND = ptr::null_mut();
-static mut H_FONT: HFONT = ptr::null_mut();
-static mut BUF: Vec<u8> = Vec::new();
+const CLASS_NAME: PCWSTR = w!("pinion_window_class");
+
+static mut H_WINDOW: Option<HWND> = None;
+static mut H_FONT: Option<HFONT> = None;
+static mut BUF: Vec<u8> = vec![];
 static mut DATA_LEN: usize = 0;
 static mut WIDTH: i32 = 0;
 static mut HEIGHT: i32 = 0;
@@ -42,48 +44,47 @@ static mut HEIGHT: i32 = 0;
 const ID_OPEN_BUTTON: i32 = 2100;
 
 fn main() -> Result<()> {
-    unsafe {
-        let class_name = l("pinion_window_class");
-        let wnd_class = WNDCLASSW {
-            style: 0,
-            lpfnWndProc: Some(window_proc),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: ptr::null_mut(),
-            hIcon: LoadIconW(ptr::null_mut(), IDI_APPLICATION),
-            hCursor: LoadCursorW(ptr::null_mut(), IDI_APPLICATION),
-            hbrBackground: GetSysColorBrush(COLOR_MENUBAR),
-            lpszMenuName: ptr::null_mut(),
-            lpszClassName: class_name.as_ptr(),
-        };
-        RegisterClassW(&wnd_class);
+    let wnd_class = WNDCLASSW {
+        lpszClassName: CLASS_NAME,
+        lpfnWndProc: Some(window_proc),
+        hCursor: unsafe { LoadCursorW(None, IDI_APPLICATION)? },
+        hbrBackground: unsafe { GetSysColorBrush(COLOR_MENUBAR) },
+        ..Default::default()
+    };
+    unsafe { RegisterClassW(&wnd_class) };
 
-        let title = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-        H_WINDOW = CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            l(&title).as_ptr(),
+    let title = format!("{} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    let hwnd = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            CLASS_NAME,
+            PCWSTR::from_raw(l(&title).as_ptr()),
             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             656,
             551,
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-            ptr::null_mut(),
-        );
-        ensure!(!H_WINDOW.is_null(), "CreateWindowExW failed.");
-
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    ensure!(hwnd.0 != 0, "failed to create window.");
+    unsafe {
+        H_WINDOW = Some(hwnd);
         BUF.reserve(640 * 480 * 3);
 
         ShowWindow(H_WINDOW, SW_SHOW);
         UpdateWindow(H_WINDOW);
-        let mut msg = init::<MSG>();
-        loop {
-            if GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
-                break;
-            }
+    }
+
+    let mut msg = MSG::default();
+    loop {
+        if unsafe { !GetMessageW(&mut msg, None, 0, 0).as_bool() } {
+            break;
+        }
+        unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
@@ -93,7 +94,7 @@ fn main() -> Result<()> {
 
 unsafe extern "system" fn window_proc(
     h_wnd: HWND,
-    msg: UINT,
+    msg: u32,
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
@@ -108,7 +109,9 @@ unsafe extern "system" fn window_proc(
             }
         }
         WM_DESTROY => {
-            DeleteObject(H_FONT as *mut c_void);
+            if let Some(font) = H_FONT {
+                DeleteObject(font);
+            }
             PostQuitMessage(0);
             Ok(())
         }
@@ -116,103 +119,120 @@ unsafe extern "system" fn window_proc(
     }
     .map_err(msg_box)
     .ok();
-    0
+
+    LRESULT::default()
 }
 
-unsafe fn create(h_wnd: HWND) -> Result<()> {
+fn create(h_wnd: HWND) -> Result<()> {
     create_font()?;
     create_button(h_wnd)?;
     Ok(())
 }
 
-unsafe fn create_font() -> Result<()> {
-    H_FONT = CreateFontW(
-        18,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY,
-        DEFAULT_PITCH | FF_DONTCARE,
-        l("メイリオ").as_ptr(),
-    );
-    ensure!(!H_FONT.is_null(), "CreateFontW failed.");
+fn create_font() -> Result<()> {
+    let font = unsafe {
+        CreateFontW(
+            18,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            DEFAULT_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32 | FF_DONTCARE.0 as u32,
+            w!("メイリオ"),
+        )
+    };
+    ensure!(!font.is_invalid(), "CreateFontW failed.");
+    unsafe { H_FONT = Some(font) };
     Ok(())
 }
 
-unsafe fn create_button(h_wnd: HWND) -> Result<()> {
-    let h_button = CreateWindowExW(
-        0,
-        l("BUTTON").as_ptr(),
-        l("Open").as_ptr(),
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        4,
-        4,
-        80,
-        24,
-        h_wnd,
-        ID_OPEN_BUTTON as HMENU,
-        ptr::null_mut(),
-        ptr::null_mut(),
-    );
-    ensure!(!h_button.is_null(), "CreateWindowExW BUTTON failed.",);
-    SendMessageW(h_button, WM_SETFONT, H_FONT as WPARAM, 0);
+fn create_button(h_wnd: HWND) -> Result<()> {
+    let h_button = unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            w!("BUTTON"),
+            w!("Open"),
+            WS_CHILD | WS_VISIBLE | WINDOW_STYLE(BS_PUSHBUTTON as u32),
+            4,
+            4,
+            80,
+            24,
+            h_wnd,
+            HMENU(ID_OPEN_BUTTON as isize),
+            None,
+            None,
+        )
+    };
+    unsafe {
+        SendMessageW(
+            h_button,
+            WM_SETFONT,
+            WPARAM(H_FONT.context("no font")?.0 as usize),
+            LPARAM::default(),
+        )
+    };
     Ok(())
 }
 
-unsafe fn command(h_wnd: HWND, w_param: WPARAM) -> Result<()> {
-    let msg = HIWORD(w_param as u32);
-    let id = LOWORD(w_param as u32) as i32;
-    if msg == BN_CLICKED {
-        if id == ID_OPEN_BUTTON {
-            let file_path = open_dialog(h_wnd)?;
-            read_image(&file_path)?;
-        }
+fn command(h_wnd: HWND, w_param: WPARAM) -> Result<()> {
+    let msg = (w_param.0 as u32) >> 16;
+    let id = ((w_param.0 as u32) & 0xffff) as i32;
+    if msg == BN_CLICKED && id == ID_OPEN_BUTTON {
+        let file_path = open_dialog(h_wnd)?;
+        read_image(&file_path)?;
     }
     Ok(())
 }
 
-unsafe fn read_image(file_path: &str) -> Result<()> {
+fn read_image(file_path: &str) -> Result<()> {
     let img = image::open(file_path)?;
-    let img = if img.width() > 640 || img.height() > 480 {
-        let new_size = if img.width() as f32 / img.height() as f32 > 1.333 {
+    let width = img.width();
+    let height = img.height();
+
+    let img = if width > 640 || height > 480 {
+        let new_size = if width as f32 / height as f32 > 1.333 {
             640
+        } else if width > height {
+            (480.0 / height as f32 * width as f32) as u32
         } else {
-            if img.width() > img.height() {
-                (480.0 / img.height() as f32 * img.width() as f32) as u32
-            } else {
-                480
-            }
+            480
         };
         img.resize(new_size, new_size, imageops::Lanczos3)
     } else {
         img
     };
-    WIDTH = img.width() as i32;
-    HEIGHT = img.height() as i32;
 
-    let bgr = img.into_bgr();
-    ensure!(bgr.len() <= 640 * 480 * 3, "Invalid data length.");
+    let width = img.width();
+    let height = img.height();
+    let mut rgb = img.into_rgb8();
+    ensure!(rgb.len() <= 640 * 480 * 3, "Invalid data length.");
 
-    let remain = (3 * WIDTH as usize) % 4;
+    // change from RGB to BGR.
+    rgb.chunks_mut(3).for_each(|c| c.swap(0, 2));
+
+    let remain = (3 * width as usize) % 4;
     if remain > 0 {
-        let chunk_size = 3 * WIDTH as usize;
-        let line_bytes_len = chunk_size + 4 - remain;
-        DATA_LEN = line_bytes_len * HEIGHT as usize;
-        let mut p = BUF.as_mut_ptr();
-        bgr.chunks(chunk_size).for_each(|c| {
-            ptr::copy_nonoverlapping(c.as_ptr(), p, chunk_size);
-            p = p.add(line_bytes_len);
+        let scan_line = 3 * width as usize;
+        let scan_line_with_padding = scan_line + 4 - remain;
+        let data_len = scan_line_with_padding * height as usize;
+        let mut p = unsafe { BUF.as_mut_ptr() };
+        rgb.chunks(scan_line).for_each(|c| unsafe {
+            ptr::copy_nonoverlapping(c.as_ptr(), p, scan_line);
+            p = p.add(scan_line_with_padding);
         });
+        unsafe { DATA_LEN = dbg!(data_len) };
     } else {
-        DATA_LEN = (WIDTH * HEIGHT * 3) as usize;
-        ptr::copy_nonoverlapping(bgr.as_ptr(), BUF.as_mut_ptr(), DATA_LEN);
+        unsafe {
+            DATA_LEN = (width * height * 3) as usize;
+            ptr::copy_nonoverlapping(rgb.as_ptr(), BUF.as_mut_ptr(), DATA_LEN);
+        }
     };
 
     let rc = RECT {
@@ -221,106 +241,112 @@ unsafe fn read_image(file_path: &str) -> Result<()> {
         right: 640,
         bottom: 512,
     };
-    InvalidateRect(H_WINDOW, &rc, TRUE);
-
-    SetWindowTextW(H_WINDOW, l(file_path).as_ptr());
+    unsafe {
+        InvalidateRect(H_WINDOW, Some(&rc), true);
+        SetWindowTextW(H_WINDOW, PCWSTR::from_raw(l(file_path).as_ptr()));
+        WIDTH = width as i32;
+        HEIGHT = height as i32;
+    }
     Ok(())
 }
 
-unsafe fn open_dialog(h_wnd: HWND) -> Result<String> {
+fn open_dialog(h_wnd: HWND) -> Result<String> {
     const MAX_PATH: u32 = 260;
     let mut buf = [0u16; MAX_PATH as usize];
 
-    let filter = l("Image file\0*.jpg;*.png;*.gif;*.bmp\0");
-    let title = l("Choose a image file");
+    let filter = w!("Image file\0*.jpg;*.png;*.gif;*.bmp\0");
+    let title = w!("Choose a image file");
 
-    let mut ofn = zeroed::<OPENFILENAMEW>();
-    ofn.lStructSize = mem::size_of::<OPENFILENAMEW>() as u32;
-    ofn.lpstrFilter = filter.as_ptr();
-    ofn.lpstrTitle = title.as_ptr();
-    ofn.lpstrFile = buf.as_mut_ptr();
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_FILEMUSTEXIST;
-    ofn.hwndOwner = h_wnd;
+    let mut ofn = OPENFILENAMEW {
+        lStructSize: mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: filter,
+        lpstrTitle: title,
+        lpstrFile: PWSTR::from_raw(buf.as_mut_ptr()),
+        nMaxFile: MAX_PATH,
+        Flags: OFN_FILEMUSTEXIST,
+        hwndOwner: h_wnd,
+        ..Default::default()
+    };
 
-    ensure!(GetOpenFileNameW(&mut ofn) != 0, "Cannot get file path.");
+    ensure!(
+        unsafe { GetOpenFileNameW(&mut ofn).as_bool() },
+        "Cannot get file path."
+    );
 
-    let slice = slice::from_raw_parts(ofn.lpstrFile, MAX_PATH as usize);
-    Ok(decode(slice))
+    let result = unsafe { ofn.lpstrFile.to_string()? };
+    Ok(result)
 }
 
-unsafe fn paint(h_wnd: HWND) -> Result<()> {
-    let mut ps = init::<PAINTSTRUCT>();
-    let hdc = BeginPaint(h_wnd, &mut ps);
+fn paint(h_wnd: HWND) -> Result<()> {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = unsafe { BeginPaint(h_wnd, &mut ps) };
 
-    let mut bi = zeroed::<BITMAPINFO>();
-    bi.bmiHeader = zeroed::<BITMAPINFOHEADER>();
-    bi.bmiHeader.biSize = mem::size_of::<BITMAPINFOHEADER>() as u32;
-    bi.bmiHeader.biWidth = WIDTH;
-    bi.bmiHeader.biHeight = -HEIGHT;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 24;
-    bi.bmiHeader.biSizeImage = DATA_LEN as u32;
-    bi.bmiHeader.biCompression = BI_RGB;
+    let width = unsafe { WIDTH };
+    let height = unsafe { HEIGHT };
 
-    let h_bmp = CreateCompatibleBitmap(hdc, WIDTH, HEIGHT);
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: height,
+            biPlanes: 1,
+            biBitCount: 24,
+            biCompression: BI_RGB,
+            biSizeImage: unsafe { DATA_LEN as u32 },
+            ..Default::default()
+        },
+        ..Default::default()
+    };
 
-    SetDIBits(
-        hdc,
-        h_bmp,
-        0,
-        HEIGHT as u32,
-        BUF.as_ptr() as *const c_void,
-        &bi,
-        DIB_RGB_COLORS,
-    );
-    let h_mdc = CreateCompatibleDC(hdc);
-    SelectObject(h_mdc, h_bmp as *mut c_void);
+    let h_bmp = unsafe { CreateCompatibleBitmap(hdc, width, height) };
 
-    let padding_left = (640 - WIDTH) / 2;
-    let padding_top = (480 - HEIGHT) / 2;
-    BitBlt(
-        hdc,
-        padding_left,
-        padding_top + 32,
-        WIDTH,
-        HEIGHT,
-        h_mdc,
-        0,
-        0,
-        SRCCOPY,
-    );
-    DeleteDC(h_mdc);
-    DeleteObject(h_bmp as *mut c_void);
-    EndPaint(h_wnd, &ps);
+    unsafe {
+        SetDIBits(
+            hdc,
+            h_bmp,
+            0,
+            height as u32,
+            BUF.as_ptr() as *const c_void,
+            &bi,
+            DIB_RGB_COLORS,
+        )
+    };
+    let h_mdc = unsafe { CreateCompatibleDC(hdc) };
+    unsafe { SelectObject(h_mdc, h_bmp) };
+
+    let padding_left = (640 - width) / 2;
+    let padding_top = (480 - height) / 2;
+    unsafe {
+        BitBlt(
+            hdc,
+            padding_left,
+            padding_top + 32,
+            width,
+            height,
+            h_mdc,
+            0,
+            0,
+            SRCCOPY,
+        );
+        DeleteDC(h_mdc);
+        DeleteObject(h_bmp);
+        EndPaint(h_wnd, &ps);
+    }
     Ok(())
 }
 
-fn msg_box(e: Error) {
+fn msg_box(e: Error) -> Result<()> {
     unsafe {
         MessageBoxW(
             H_WINDOW,
-            l(&e.to_string()).as_ptr(),
-            l("Error").as_ptr(),
+            PCWSTR::from_raw(l(&e.to_string()).as_ptr()),
+            w!("Error"),
             MB_OK,
         )
     };
+    Ok(())
 }
 
 fn l(source: &str) -> Vec<u16> {
     source.encode_utf16().chain(Some(0)).collect()
-}
-
-fn decode(source: &[u16]) -> String {
-    decode_utf16(source.iter().take_while(|&n| n != &0).cloned())
-        .map(|r| r.unwrap_or(REPLACEMENT_CHARACTER))
-        .collect()
-}
-
-unsafe fn init<T>() -> T {
-    mem::MaybeUninit::<T>::uninit().assume_init()
-}
-
-unsafe fn zeroed<T>() -> T {
-    mem::MaybeUninit::<T>::zeroed().assume_init()
 }

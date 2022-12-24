@@ -1,23 +1,24 @@
 [package]
 name = "pinion"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["benki"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-image = "0.23"
+image = "0.24"
 
-[dependencies.winapi]
-version = "0.3"
+[dependencies.windows]
+version = "0.43"
 features = [
-    "commdlg",
-    "minwindef",
-    "windef",
-    "wingdi",
-    "winuser",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls_Dialogs",
 ]
+
 
 [profile.release]
 codegen-units = 1
 lto = true
+panic = "abort"
