@@ -1,7 +1,8 @@
 // #![windows_subsystem = "windows"]
 
-use anyhow::{ensure, Context, Error, Result};
+use anyhow::{anyhow, ensure, Error, Result};
 use image::{self, imageops};
+use std::cell::{Ref, RefCell, RefMut};
 use std::env;
 use std::ffi::c_void;
 use std::mem;
@@ -34,12 +35,29 @@ use windows::{
 
 const CLASS_NAME: PCWSTR = w!("pinion_window_class");
 
-static mut H_WINDOW: Option<HWND> = None;
-static mut H_FONT: Option<HFONT> = None;
-static mut BUF: Vec<u8> = vec![];
-static mut DATA_LEN: usize = 0;
-static mut WIDTH: i32 = 0;
-static mut HEIGHT: i32 = 0;
+static H_WINDOW: Global<HWND> = Global::new();
+static H_FONT: Global<HFONT> = Global::new();
+static BUF: Global<Vec<u8>> = Global::new();
+static DATA_LEN: Global<usize> = Global::new();
+static WIDTH: Global<i32> = Global::new();
+static HEIGHT: Global<i32> = Global::new();
+
+struct Global<T>(RefCell<Option<T>>);
+unsafe impl<T> Sync for Global<T> {}
+
+impl<T> Global<T> {
+    const fn new() -> Self {
+        Self(RefCell::new(None))
+    }
+
+    fn borrow(&self) -> Ref<Option<T>> {
+        self.0.borrow()
+    }
+
+    fn borrow_mut(&self) -> RefMut<Option<T>> {
+        self.0.borrow_mut()
+    }
+}
 
 const ID_OPEN_BUTTON: i32 = 2100;
 
@@ -71,13 +89,17 @@ fn main() -> Result<()> {
         )
     };
     ensure!(hwnd.0 != 0, "failed to create window.");
-    unsafe {
-        H_WINDOW = Some(hwnd);
-        BUF.reserve(640 * 480 * 3);
 
-        ShowWindow(H_WINDOW, SW_SHOW);
-        UpdateWindow(H_WINDOW);
+    let mut v = Vec::new();
+    v.reserve(640 * 480 * 3);
+    *BUF.borrow_mut() = Some(v);
+
+    unsafe {
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
     }
+
+    *H_WINDOW.borrow_mut() = Some(hwnd);
 
     let mut msg = MSG::default();
     loop {
@@ -102,14 +124,14 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => create(h_wnd),
         WM_COMMAND => command(h_wnd, w_param),
         WM_PAINT => {
-            if DATA_LEN > 0 {
+            if DATA_LEN.borrow().gt(&Some(0)) {
                 paint(h_wnd)
             } else {
                 return DefWindowProcW(h_wnd, msg, w_param, l_param);
             }
         }
         WM_DESTROY => {
-            if let Some(font) = H_FONT {
+            if let Some(font) = *H_FONT.borrow() {
                 DeleteObject(font);
             }
             PostQuitMessage(0);
@@ -149,7 +171,7 @@ fn create_font() -> Result<()> {
         )
     };
     ensure!(!font.is_invalid(), "CreateFontW failed.");
-    unsafe { H_FONT = Some(font) };
+    *H_FONT.borrow_mut() = Some(font);
     Ok(())
 }
 
@@ -170,11 +192,12 @@ fn create_button(h_wnd: HWND) -> Result<()> {
             None,
         )
     };
+    let Some(font) = *H_FONT.borrow() else { return  Err(anyhow!("no font.")) };
     unsafe {
         SendMessageW(
             h_button,
             WM_SETFONT,
-            WPARAM(H_FONT.context("no font")?.0 as usize),
+            WPARAM(font.0 as usize),
             LPARAM::default(),
         )
     };
@@ -218,20 +241,24 @@ fn read_image(file_path: &str) -> Result<()> {
     rgb.chunks_mut(3).for_each(|c| c.swap(0, 2));
 
     let remain = (3 * width as usize) % 4;
+    let mut buf = BUF.borrow_mut();
+    let Some(buf) = buf.as_mut() else { return Err(anyhow!("no buffer.")) };
+
     if remain > 0 {
         let scan_line = 3 * width as usize;
         let scan_line_with_padding = scan_line + 4 - remain;
         let data_len = scan_line_with_padding * height as usize;
-        let mut p = unsafe { BUF.as_mut_ptr() };
+        let mut p = buf.as_mut_ptr();
         rgb.chunks(scan_line).for_each(|c| unsafe {
             ptr::copy_nonoverlapping(c.as_ptr(), p, scan_line);
             p = p.add(scan_line_with_padding);
         });
-        unsafe { DATA_LEN = dbg!(data_len) };
+        *DATA_LEN.borrow_mut() = Some(data_len);
     } else {
+        let data_len = (width * height * 3) as usize;
+        *DATA_LEN.borrow_mut() = Some(data_len);
         unsafe {
-            DATA_LEN = (width * height * 3) as usize;
-            ptr::copy_nonoverlapping(rgb.as_ptr(), BUF.as_mut_ptr(), DATA_LEN);
+            ptr::copy_nonoverlapping(rgb.as_ptr(), buf.as_mut_ptr(), data_len);
         }
     };
 
@@ -241,12 +268,13 @@ fn read_image(file_path: &str) -> Result<()> {
         right: 640,
         bottom: 512,
     };
+    let hwnd = *H_WINDOW.borrow();
     unsafe {
-        InvalidateRect(H_WINDOW, Some(&rc), true);
-        SetWindowTextW(H_WINDOW, PCWSTR::from_raw(l(file_path).as_ptr()));
-        WIDTH = width as i32;
-        HEIGHT = height as i32;
+        InvalidateRect(hwnd, Some(&rc), true);
+        SetWindowTextW(hwnd, PCWSTR::from_raw(l(file_path).as_ptr()));
     }
+    *WIDTH.borrow_mut() = Some(width as i32);
+    *HEIGHT.borrow_mut() = Some(height as i32);
     Ok(())
 }
 
@@ -281,8 +309,9 @@ fn paint(h_wnd: HWND) -> Result<()> {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(h_wnd, &mut ps) };
 
-    let width = unsafe { WIDTH };
-    let height = unsafe { HEIGHT };
+    let Some(data_len) = *DATA_LEN.borrow() else { return Err(anyhow!("no data_len")) };
+    let Some(width) = *WIDTH.borrow() else { return Err(anyhow!("no width.")) };
+    let Some(height) = *HEIGHT.borrow() else { return Err(anyhow!("no height.")) };
 
     let bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -292,7 +321,7 @@ fn paint(h_wnd: HWND) -> Result<()> {
             biPlanes: 1,
             biBitCount: 24,
             biCompression: BI_RGB,
-            biSizeImage: unsafe { DATA_LEN as u32 },
+            biSizeImage: data_len as u32,
             ..Default::default()
         },
         ..Default::default()
@@ -300,13 +329,14 @@ fn paint(h_wnd: HWND) -> Result<()> {
 
     let h_bmp = unsafe { CreateCompatibleBitmap(hdc, width, height) };
 
+    let Some(ref buf) = *BUF.borrow() else { return Err(anyhow!("no buffer.")) };
     unsafe {
         SetDIBits(
             hdc,
             h_bmp,
             0,
             height as u32,
-            BUF.as_ptr() as *const c_void,
+            buf.as_ptr() as *const c_void,
             &bi,
             DIB_RGB_COLORS,
         )
@@ -336,9 +366,10 @@ fn paint(h_wnd: HWND) -> Result<()> {
 }
 
 fn msg_box(e: Error) -> Result<()> {
+    let hwnd = *H_WINDOW.borrow();
     unsafe {
         MessageBoxW(
-            H_WINDOW,
+            hwnd,
             PCWSTR::from_raw(l(&e.to_string()).as_ptr()),
             w!("Error"),
             MB_OK,
