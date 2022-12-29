@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 use anyhow::{anyhow, ensure, Error, Result};
 use image::{self, imageops};
