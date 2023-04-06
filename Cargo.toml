@@ -1,15 +1,24 @@
 [package]
 name = "pinion"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["benki"]
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-image = "0.24"
+
+[dependencies.image]
+version = "0.24"
+default-features = false
+features = [
+    "jpeg",
+    "gif",
+    "bmp",
+    "png",
+]
 
 [dependencies.windows]
-version = "0.43"
+version = "0.48"
 features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -17,6 +26,8 @@ features = [
     "Win32_UI_Controls_Dialogs",
 ]
 
+[profile.dev]
+debug = 0
 
 [profile.release]
 codegen-units = 1

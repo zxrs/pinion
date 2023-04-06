@@ -1,11 +1,11 @@
-#![windows_subsystem = "windows"]
+// #![windows_subsystem = "windows"]
 
-use anyhow::{anyhow, ensure, Error, Result};
-use image::{self, imageops};
-use std::cell::{Ref, RefCell, RefMut};
+use anyhow::{ensure, Context, Error, Result};
+use image::{self, imageops, DynamicImage};
 use std::env;
 use std::ffi::c_void;
 use std::mem;
+use std::path::Path;
 use std::ptr;
 use windows::{
     core::{PCWSTR, PWSTR},
@@ -33,31 +33,17 @@ use windows::{
     },
 };
 
+mod lz4i_decoder;
+use lz4i_decoder::read_lz4i;
+
 const CLASS_NAME: PCWSTR = w!("pinion_window_class");
 
-static H_WINDOW: Global<HWND> = Global::new();
-static H_FONT: Global<HFONT> = Global::new();
-static BUF: Global<Vec<u8>> = Global::new();
-static DATA_LEN: Global<usize> = Global::new();
-static WIDTH: Global<i32> = Global::new();
-static HEIGHT: Global<i32> = Global::new();
-
-struct Global<T>(RefCell<Option<T>>);
-unsafe impl<T> Sync for Global<T> {}
-
-impl<T> Global<T> {
-    const fn new() -> Self {
-        Self(RefCell::new(None))
-    }
-
-    fn borrow(&self) -> Ref<Option<T>> {
-        self.0.borrow()
-    }
-
-    fn borrow_mut(&self) -> RefMut<Option<T>> {
-        self.0.borrow_mut()
-    }
-}
+static mut H_WINDOW: Option<HWND> = None;
+static mut H_FONT: Option<HFONT> = None;
+static mut BUF: Vec<u8> = Vec::new();
+static mut DATA_LEN: usize = 0;
+static mut WIDTH: i32 = 0;
+static mut HEIGHT: i32 = 0;
 
 const ID_OPEN_BUTTON: i32 = 2100;
 
@@ -90,16 +76,14 @@ fn main() -> Result<()> {
     };
     ensure!(hwnd.0 != 0, "failed to create window.");
 
-    let mut v = Vec::new();
-    v.reserve(640 * 480 * 3);
-    *BUF.borrow_mut() = Some(v);
+    unsafe { BUF.reserve(640 * 480 * 3) };
 
     unsafe {
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
     }
 
-    *H_WINDOW.borrow_mut() = Some(hwnd);
+    unsafe { H_WINDOW = Some(hwnd) };
 
     let mut msg = MSG::default();
     loop {
@@ -124,14 +108,14 @@ unsafe extern "system" fn window_proc(
         WM_CREATE => create(h_wnd),
         WM_COMMAND => command(h_wnd, w_param),
         WM_PAINT => {
-            if DATA_LEN.borrow().gt(&Some(0)) {
+            if DATA_LEN > 0 {
                 paint(h_wnd)
             } else {
                 return DefWindowProcW(h_wnd, msg, w_param, l_param);
             }
         }
         WM_DESTROY => {
-            if let Some(font) = *H_FONT.borrow() {
+            if let Some(font) = H_FONT {
                 DeleteObject(font);
             }
             PostQuitMessage(0);
@@ -171,7 +155,7 @@ fn create_font() -> Result<()> {
         )
     };
     ensure!(!font.is_invalid(), "CreateFontW failed.");
-    *H_FONT.borrow_mut() = Some(font);
+    unsafe { H_FONT = Some(font) };
     Ok(())
 }
 
@@ -192,12 +176,11 @@ fn create_button(h_wnd: HWND) -> Result<()> {
             None,
         )
     };
-    let Some(font) = *H_FONT.borrow() else { return  Err(anyhow!("no font.")) };
     unsafe {
         SendMessageW(
             h_button,
             WM_SETFONT,
-            WPARAM(font.0 as usize),
+            WPARAM(H_FONT.context("no font")?.0 as usize),
             LPARAM::default(),
         )
     };
@@ -214,8 +197,17 @@ fn command(h_wnd: HWND, w_param: WPARAM) -> Result<()> {
     Ok(())
 }
 
+fn open_image(file_path: &str) -> Result<DynamicImage> {
+    let path = Path::new(file_path);
+    if path.extension().context("no extension")?.eq("lz4i") {
+        read_lz4i(file_path)
+    } else {
+        Ok(image::open(file_path)?)
+    }
+}
+
 fn read_image(file_path: &str) -> Result<()> {
-    let img = image::open(file_path)?;
+    let img = open_image(file_path)?;
     let width = img.width();
     let height = img.height();
 
@@ -241,24 +233,22 @@ fn read_image(file_path: &str) -> Result<()> {
     rgb.chunks_mut(3).for_each(|c| c.swap(0, 2));
 
     let remain = (3 * width as usize) % 4;
-    let mut buf = BUF.borrow_mut();
-    let Some(buf) = buf.as_mut() else { return Err(anyhow!("no buffer.")) };
 
     if remain > 0 {
         let scan_line = 3 * width as usize;
         let scan_line_with_padding = scan_line + 4 - remain;
         let data_len = scan_line_with_padding * height as usize;
-        let mut p = buf.as_mut_ptr();
+        let mut p = unsafe { BUF.as_mut_ptr() };
         rgb.chunks(scan_line).for_each(|c| unsafe {
             ptr::copy_nonoverlapping(c.as_ptr(), p, scan_line);
             p = p.add(scan_line_with_padding);
         });
-        *DATA_LEN.borrow_mut() = Some(data_len);
+        unsafe { DATA_LEN = data_len };
     } else {
         let data_len = (width * height * 3) as usize;
-        *DATA_LEN.borrow_mut() = Some(data_len);
         unsafe {
-            ptr::copy_nonoverlapping(rgb.as_ptr(), buf.as_mut_ptr(), data_len);
+            DATA_LEN = data_len;
+            ptr::copy_nonoverlapping(rgb.as_ptr(), BUF.as_mut_ptr(), data_len);
         }
     };
 
@@ -268,13 +258,13 @@ fn read_image(file_path: &str) -> Result<()> {
         right: 640,
         bottom: 512,
     };
-    let hwnd = *H_WINDOW.borrow();
     unsafe {
-        InvalidateRect(hwnd, Some(&rc), true);
-        SetWindowTextW(hwnd, PCWSTR::from_raw(l(file_path).as_ptr()));
+        let win = H_WINDOW.context("no window")?;
+        InvalidateRect(win, Some(&rc), true);
+        SetWindowTextW(win, PCWSTR::from_raw(l(file_path).as_ptr()));
+        WIDTH = width as i32;
+        HEIGHT = height as i32;
     }
-    *WIDTH.borrow_mut() = Some(width as i32);
-    *HEIGHT.borrow_mut() = Some(height as i32);
     Ok(())
 }
 
@@ -282,7 +272,7 @@ fn open_dialog(h_wnd: HWND) -> Result<String> {
     const MAX_PATH: u32 = 260;
     let mut buf = [0u16; MAX_PATH as usize];
 
-    let filter = w!("Image file\0*.jpg;*.png;*.gif;*.bmp\0");
+    let filter = w!("Image file (jpg, png, gif, bmp, lz4i)\0*.jpg;*.png;*.gif;*.bmp;*.lz4i\0");
     let title = w!("Choose a image file");
 
     let mut ofn = OPENFILENAMEW {
@@ -309,34 +299,29 @@ fn paint(h_wnd: HWND) -> Result<()> {
     let mut ps = PAINTSTRUCT::default();
     let hdc = unsafe { BeginPaint(h_wnd, &mut ps) };
 
-    let Some(data_len) = *DATA_LEN.borrow() else { return Err(anyhow!("no data_len")) };
-    let Some(width) = *WIDTH.borrow() else { return Err(anyhow!("no width.")) };
-    let Some(height) = *HEIGHT.borrow() else { return Err(anyhow!("no height.")) };
-
     let bi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: width,
-            biHeight: -height,
+            biWidth: unsafe { WIDTH },
+            biHeight: unsafe { -HEIGHT },
             biPlanes: 1,
             biBitCount: 24,
-            biCompression: BI_RGB,
-            biSizeImage: data_len as u32,
+            biCompression: BI_RGB.0 as u32,
+            biSizeImage: unsafe { DATA_LEN as u32 },
             ..Default::default()
         },
         ..Default::default()
     };
 
-    let h_bmp = unsafe { CreateCompatibleBitmap(hdc, width, height) };
+    let h_bmp = unsafe { CreateCompatibleBitmap(hdc, WIDTH, HEIGHT) };
 
-    let Some(ref buf) = *BUF.borrow() else { return Err(anyhow!("no buffer.")) };
     unsafe {
         SetDIBits(
             hdc,
             h_bmp,
             0,
-            height as u32,
-            buf.as_ptr() as *const c_void,
+            HEIGHT as u32,
+            BUF.as_ptr() as *const c_void,
             &bi,
             DIB_RGB_COLORS,
         )
@@ -344,15 +329,15 @@ fn paint(h_wnd: HWND) -> Result<()> {
     let h_mdc = unsafe { CreateCompatibleDC(hdc) };
     unsafe { SelectObject(h_mdc, h_bmp) };
 
-    let padding_left = (640 - width) / 2;
-    let padding_top = (480 - height) / 2;
     unsafe {
+        let padding_left = (640 - WIDTH) / 2;
+        let padding_top = (480 - HEIGHT) / 2;
         BitBlt(
             hdc,
             padding_left,
             padding_top + 32,
-            width,
-            height,
+            WIDTH,
+            HEIGHT,
             h_mdc,
             0,
             0,
@@ -366,10 +351,9 @@ fn paint(h_wnd: HWND) -> Result<()> {
 }
 
 fn msg_box(e: Error) -> Result<()> {
-    let hwnd = *H_WINDOW.borrow();
     unsafe {
         MessageBoxW(
-            hwnd,
+            H_WINDOW.context("no window")?,
             PCWSTR::from_raw(l(&e.to_string()).as_ptr()),
             w!("Error"),
             MB_OK,
