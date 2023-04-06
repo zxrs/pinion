@@ -1,4 +1,4 @@
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
 use std::fs;
 use std::mem;
@@ -24,7 +24,11 @@ struct Lz4iHeader {
 fn lz4_decomp(header: &Lz4iHeader, src: &[u8]) -> Result<Vec<u8>> {
     let width = header.width.to_be();
     let height = header.height.to_be();
-    let dst_capacity = width as usize * height as usize * header.channels as usize;
+    let dst_capacity = width
+        .checked_mul(height)
+        .context("u32 overflow")?
+        .checked_mul(header.channels as u32)
+        .context("u32 overflow")? as usize;
     let mut dst = vec![0; dst_capacity];
     unsafe {
         LZ4_decompress_safe(
@@ -49,15 +53,17 @@ pub fn read_lz4i(file_path: &str) -> Result<DynamicImage> {
 
     let decomped = lz4_decomp(header, &raw_lz4i[header_size..])?;
 
-    if header.channels == 3 {
-        let mut buf = ImageBuffer::<Rgb<_>, _>::new(width, height);
-        buf.copy_from_slice(&decomped);
-        return Ok(DynamicImage::ImageRgb8(buf));
+    let img = if header.channels == 3 {
+        let buf =
+            ImageBuffer::<Rgb<_>, _>::from_raw(width, height, decomped).context("buf overflow.")?;
+        DynamicImage::ImageRgb8(buf)
     } else if header.channels == 4 {
-        let mut buf = ImageBuffer::<Rgba<_>, _>::new(width, height);
-        buf.copy_from_slice(&decomped);
-        return Ok(DynamicImage::ImageRgba8(buf));
-    }
+        let buf = ImageBuffer::<Rgba<_>, _>::from_raw(width, height, decomped)
+            .context("buf overflow.")?;
+        DynamicImage::ImageRgba8(buf)
+    } else {
+        return Err(anyhow!("Unsupported LZ4I channels: {}.", header.channels));
+    };
 
-    Err(anyhow!("Unsupported LZ4I channels: {}.", header.channels))
+    Ok(img)
 }
