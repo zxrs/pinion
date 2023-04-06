@@ -44,7 +44,7 @@ fn lz4_decomp(header: &Lz4iHeader, src: &[u8]) -> Result<Vec<u8>> {
 pub fn read_lz4i(file_path: &str) -> Result<DynamicImage> {
     let raw_lz4i = fs::read(file_path)?;
     let header = unsafe { &*(raw_lz4i.as_ptr() as *const Lz4iHeader) };
-    ensure!(header.sig[..].eq(b"lz4i"), "Invalid LZ4I format.");
+    ensure!(header.sig.eq(b"lz4i"), "Invalid LZ4I format.");
 
     let width = header.width.to_be();
     let height = header.height.to_be();

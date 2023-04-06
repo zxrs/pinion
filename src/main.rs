@@ -76,14 +76,12 @@ fn main() -> Result<()> {
     };
     ensure!(hwnd.0 != 0, "failed to create window.");
 
-    unsafe { BUF.reserve(640 * 480 * 3) };
-
     unsafe {
+        BUF.reserve(640 * 480 * 3);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
+        H_WINDOW = Some(hwnd);
     }
-
-    unsafe { H_WINDOW = Some(hwnd) };
 
     let mut msg = MSG::default();
     loop {
